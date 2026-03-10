@@ -1,0 +1,23 @@
+# One CSS selector per line. Lines starting with # are ignored.
+
+header
+footer
+nav
+aside
+.sidebar
+.recommendation
+.related-posts
+.related-articles
+.comments
+.comment-list
+.share-bar
+.social-share
+.newsletter
+.advertisement
+.ad
+.promo
+.knwls-menu
+.article-comment-container
+[data-testid="recommendation"]
+[data-component="related"]
+[aria-label="Recommended"]

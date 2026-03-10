@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Article Extractor"
+  short_description: "Extract clean article text and in-body images from webpages"
+  default_prompt: "Extract the main article body and in-body images from a URL, and remove non-content regions using CSS selectors when needed."
