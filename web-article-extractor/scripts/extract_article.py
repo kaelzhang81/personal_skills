@@ -804,15 +804,51 @@ def normalize_x_rich_text(text: str) -> str:
     return normalize_multiline("\n".join(fixed))
 
 
-def build_markdown_body(root: Tag, extracted_text: str) -> str:
+def should_fallback_to_rich_text(markdown: str, rich_text: str) -> bool:
+    markdown_flat = normalize_space(markdown)
+    rich_flat = normalize_space(rich_text)
+    if not rich_flat:
+        return False
+    if not markdown_flat:
+        return True
+
+    # X rich text frequently uses div/span blocks. A markdown rebuild may
+    # preserve headings and bullets but silently drop long narrative chunks.
+    return len(markdown_flat) < int(len(rich_flat) * 0.7)
+
+
+def markdown_line_dedupe_key(line: str) -> str:
+    key = line.strip()
+    key = re.sub(r"^#+\s+", "", key)
+    key = re.sub(r"^[-*>]\s+", "", key)
+    key = normalize_space(key)
+    return key.lower()
+
+
+def build_markdown_body(root: Tag, extracted_text: str, include_div_leaves: bool = False) -> str:
+    block_tags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "pre"]
+    if include_div_leaves:
+        block_tags.append("div")
+
     blocks: list[str] = []
     last_line = ""
-    for node in root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "pre"]):
+    last_key = ""
+    for node in root.find_all(block_tags):
         if node.name == "pre":
             raw = node.get_text("\n", strip=False).strip()
             if not raw:
                 continue
             line = "```\n" + raw + "\n```"
+        elif include_div_leaves and node.name == "div":
+            # Use only leaf-level div blocks to avoid repeating nested text.
+            if node.find(block_tags, recursive=False):
+                continue
+            if node.find_parent(["li", "p", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"]):
+                continue
+            text = normalize_multiline(node.get_text("\n", strip=True))
+            if not text:
+                continue
+            line = text
         else:
             text = get_node_text(node)
             if not text:
@@ -826,10 +862,12 @@ def build_markdown_body(root: Tag, extracted_text: str) -> str:
                 line = "> " + text
             else:
                 line = text
-        if line == last_line:
+        line_key = markdown_line_dedupe_key(line)
+        if line == last_line or line_key == last_key:
             continue
         blocks.append(line)
         last_line = line
+        last_key = line_key
     markdown = "\n\n".join(blocks) if blocks else ""
     fallback_text = (
         normalize_multiline(extracted_text)
@@ -1025,7 +1063,12 @@ def main() -> int:
         rich_node, rich_text, rich_selector = extract_x_rich_text_node(root)
         if rich_node is not None and rich_text:
             extracted_text = normalize_x_rich_text(rich_text)
-            body_markdown = build_markdown_body(rich_node, extracted_text)
+            rich_markdown = build_markdown_body(rich_node, extracted_text, include_div_leaves=True)
+            if should_fallback_to_rich_text(rich_markdown, extracted_text):
+                body_markdown = extracted_text
+                warnings.append("X cleanup: markdown fallback to normalized rich text")
+            else:
+                body_markdown = rich_markdown
             warnings.append(f"X cleanup: using rich text node {rich_selector}")
         else:
             cleaned = clean_x_text_noise(extracted_text)
