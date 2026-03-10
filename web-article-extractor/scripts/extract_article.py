@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -102,13 +102,20 @@ X_RICH_TEXT_SELECTORS = (
     "[data-testid='tweetText']",
 )
 
+INVISIBLE_CHARS_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+
+def clean_invisible_chars(text: str) -> str:
+    cleaned = (text or "").replace("\xa0", " ").replace("\u202f", " ")
+    return INVISIBLE_CHARS_RE.sub("", cleaned)
+
 
 def normalize_space(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "")).strip()
+    return re.sub(r"\s+", " ", clean_invisible_chars(text)).strip()
 
 
 def normalize_multiline(text: str) -> str:
-    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    raw = clean_invisible_chars(text).replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.rstrip() for line in raw.split("\n")]
     merged = "\n".join(lines)
     merged = re.sub(r"\n{3,}", "\n\n", merged)
@@ -825,6 +832,67 @@ def markdown_line_dedupe_key(line: str) -> str:
     return key.lower()
 
 
+def extract_pre_block_text(node: Tag) -> str:
+    snapshot = BeautifulSoup(str(node), "html.parser")
+    pre_node = snapshot.find(node.name) or snapshot
+    parts: list[str] = []
+    block_like_tags = {
+        "code",
+        "div",
+        "p",
+        "li",
+        "ul",
+        "ol",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "td",
+        "th",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    }
+
+    def ensure_newline() -> None:
+        if parts and not parts[-1].endswith("\n"):
+            parts.append("\n")
+
+    def walk(curr: Tag | NavigableString) -> None:
+        if isinstance(curr, NavigableString):
+            parts.append(str(curr))
+            return
+        if not isinstance(curr, Tag):
+            return
+
+        name = (curr.name or "").lower()
+        if name == "br":
+            ensure_newline()
+            return
+
+        is_block_like = name in block_like_tags
+        if is_block_like and parts:
+            ensure_newline()
+
+        for child in curr.children:
+            walk(child)
+
+        if is_block_like:
+            ensure_newline()
+
+    for child in pre_node.children:
+        walk(child)
+
+    return normalize_multiline("".join(parts))
+
+
 def build_markdown_body(root: Tag, extracted_text: str, include_div_leaves: bool = False) -> str:
     block_tags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "pre"]
     if include_div_leaves:
@@ -835,7 +903,7 @@ def build_markdown_body(root: Tag, extracted_text: str, include_div_leaves: bool
     last_key = ""
     for node in root.find_all(block_tags):
         if node.name == "pre":
-            raw = node.get_text("\n", strip=False).strip()
+            raw = extract_pre_block_text(node)
             if not raw:
                 continue
             line = "```\n" + raw + "\n```"
@@ -883,6 +951,29 @@ def build_markdown_body(root: Tag, extracted_text: str, include_div_leaves: bool
     if fallback_text and len(markdown) < max(320, int(len(fallback_text) * 0.35)):
         return fallback_text
     return markdown
+
+
+def strip_redundant_leading_title(body_markdown: str, title: str) -> str:
+    lines = (body_markdown or "").splitlines()
+    if not lines:
+        return body_markdown
+
+    first_nonempty = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first_nonempty is None:
+        return body_markdown
+
+    heading = lines[first_nonempty].strip()
+    match = re.match(r"^#{1,6}\s+(.+)$", heading)
+    if not match:
+        return body_markdown
+
+    if normalize_space(match.group(1)).lower() != normalize_space(title).lower():
+        return body_markdown
+
+    del lines[first_nonempty]
+    while first_nonempty < len(lines) and not lines[first_nonempty].strip():
+        del lines[first_nonempty]
+    return "\n".join(lines).strip()
 
 
 def extract_title(soup: BeautifulSoup, root: Tag) -> str:
@@ -936,6 +1027,7 @@ def markdown_document(
     body_markdown: str,
     images: list[dict],
 ) -> str:
+    final_body = strip_redundant_leading_title(body_markdown, title) or "(empty)"
     lines = [
         f"# {title}",
         "",
@@ -945,7 +1037,7 @@ def markdown_document(
         "",
         "## Content",
         "",
-        body_markdown or "(empty)",
+        final_body,
         "",
         "## Images",
         "",
